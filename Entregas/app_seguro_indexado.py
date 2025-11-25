@@ -1,41 +1,55 @@
-# app_dash_boyaca_v2.py
+# ========================================================
+# app_seguro_indexado.py — Dashboard integrado FINAL
+# ========================================================
+
 from pathlib import Path
 import json
 import numpy as np
 import pandas as pd
 import joblib
 
-from dash import Dash, dcc, html, dash_table, Input, Output, State
+from dash import Dash, dcc, html, Input, Output, State
 import dash_bootstrap_components as dbc
 import plotly.express as px
+import plotly.graph_objects as go
 from sklearn.impute import SimpleImputer
 
-# ===================== Carga de artefactos =====================
+# ========================================================
+# RUTA BASE
+# ========================================================
 BASE_DIR = Path(__file__).resolve().parent
 ARTI = BASE_DIR / "artifacts"
+DATA = BASE_DIR / ".." / "Data"
 
-DF       = pd.read_csv(ARTI / "dataset_modelo.csv")
-DF_RES   = pd.read_csv(ARTI / "df_resultados.csv")
-META     = json.loads((ARTI / "metadata.json").read_text(encoding="utf-8"))
-PIPE     = joblib.load(ARTI / "modelo_boyaca.pkl")
+# ========================================================
+# CARGA MODELO Y DATASET
+# ========================================================
+DF = pd.read_csv(ARTI / "dataset_modelo.csv")
+META = json.loads((ARTI / "metadata.json").read_text(encoding="utf-8"))
+PIPE = joblib.load(ARTI / "modelo_boyaca.pkl")
 FEATURE_COLS = joblib.load(ARTI / "feature_cols.pkl")
 
-# ---------- Parche robusto para SimpleImputer ----------
+# ========================================================
+# CARGA GEOJSON REAL DE COLOMBIA
+# ========================================================
+GEO_COL = json.loads((DATA / "colombia.geo.json").read_text(encoding="utf-8"))
+
+# ========================================================
+# FIX IMPUTER (VERSIÓN 1.5 → 1.3)
+# ========================================================
 def fix_imputer_dtype(est):
-    """Asegura que cualquier SimpleImputer tenga _fit_dtype válido."""
-    def _touch(x):
-        if isinstance(x, SimpleImputer):
-            kd = getattr(getattr(x, "_fit_dtype", None), "kind", None)
-            if kd is None:
-                x._fit_dtype = np.dtype("float64")
-    _touch(est)
+    if isinstance(est, SimpleImputer):
+        if getattr(getattr(est, "_fit_dtype", None), "kind", None) is None:
+            est._fit_dtype = np.dtype("float64")
     if hasattr(est, "named_steps"):
         for s in est.named_steps.values():
             fix_imputer_dtype(s)
 
 fix_imputer_dtype(PIPE)
 
-# ===================== Normalización mínima =====================
+# ========================================================
+# NORMALIZACIÓN FECHAS
+# ========================================================
 if "fecha" in DF.columns:
     DF["fecha"] = pd.to_datetime(DF["fecha"], errors="coerce")
 elif "yyyymm" in DF.columns:
@@ -45,89 +59,21 @@ DF["rendimiento"] = pd.to_numeric(DF["rendimiento"], errors="coerce")
 DF = DF.dropna(subset=["fecha", "rendimiento"]).copy()
 DF = DF.sort_values("fecha")
 
-# columnas candidatas para análisis
-CAND_VARS = [c for c in [
-    "NDVI", "EVI", "Precipitacion", "TempMax", "TempMin", "HumedadRelativa"
-] if c in DF.columns]
-
-# columnas temporales para análisis estacional
-if "mes" in DF.columns:
-    DF["mes_num"] = DF["mes"].astype(int)
-else:
-    DF["mes_num"] = DF["fecha"].dt.month
-
-DF["mes_nombre"] = DF["mes_num"].map({
-    1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr",
-    5: "May", 6: "Jun", 7: "Jul", 8: "Ago",
-    9: "Sep",10: "Oct",11: "Nov",12: "Dic"
-})
 DF["anio"] = DF["fecha"].dt.year
+DF["mes_num"] = DF["fecha"].dt.month
+DF["mes_nombre"] = DF["mes_num"].map({
+    1:"Ene",2:"Feb",3:"Mar",4:"Abr",5:"May",6:"Jun",
+    7:"Jul",8:"Ago",9:"Sep",10:"Oct",11:"Nov",12:"Dic"
+})
 
-DF_SORTED = DF.sort_values("fecha").copy()
+CAND_VARS = [
+    v for v in ["NDVI","EVI","Precipitacion","TempMax","TempMin","HumedadRelativa"]
+    if v in DF.columns
+]
 
-# ===================== Utilidades del pipeline =====================
-
-def _iter_steps(est):
-    yield est
-    if hasattr(est, "named_steps"):
-        for s in est.named_steps.values():
-            yield from _iter_steps(s)
-
-def required_cols_from_pipe(pipe, fallback):
-    """Intenta recuperar feature_names_in_ desde cualquier step."""
-    for est in _iter_steps(pipe):
-        cols = getattr(est, "feature_names_in_", None)
-        if cols is not None:
-            return list(cols)
-    return list(fallback)
-
-ALIASES = {
-    "ndvi": ["ndvi"],
-    "evi": ["evi"],
-    "precipitacion": ["prec", "precipitacion", "rain", "ppt", "mm"],
-    "tempmax": ["tmax", "tempmax", "temp_max", "max"],
-    "tempmin": ["tmin", "tempmin", "temp_min", "min"],
-    "humedadrelativa": ["hum", "humedad", "rh", "humedadrelativa"],
-    "month_sin": ["month_sin", "mes_sin"],
-    "month_cos": ["month_cos", "mes_cos"],
-    "mes": ["mes", "month"],
-    "anio": ["anio", "year"],
-    "fecha": ["fecha", "date", "yyyymm", "yearmonth"]
-}
-
-def build_pred_row(ndvi, evi, precip, tmax, tmin, hum, mes, req_cols):
-    """Construye una fila de predicción con el mismo orden de columnas del pipeline."""
-    m_sin = np.sin(2*np.pi*mes/12.0)
-    m_cos = np.cos(2*np.pi*mes/12.0)
-
-    values = {
-        "ndvi": float(ndvi),
-        "evi": float(evi),
-        "precipitacion": float(precip),
-        "tempmax": float(tmax),
-        "tempmin": float(tmin),
-        "humedadrelativa": float(hum),
-        "month_sin": m_sin,
-        "month_cos": m_cos,
-        "mes": int(mes),
-        "anio": int(DF["anio"].max()),  # último año del dataset
-        "fecha": int(DF["anio"].max()*100 + mes),
-    }
-
-    def match_value(col):
-        cl = col.lower()
-        if cl in values:
-            return values[cl]
-        for key, al in ALIASES.items():
-            if any(a in cl for a in al) and key in values:
-                return values[key]
-        return np.nan
-
-    row = pd.DataFrame([{c: match_value(c) for c in req_cols}], columns=req_cols)
-    return row.apply(pd.to_numeric, errors="coerce")
-
-# ===================== Componentes visuales =====================
-
+# ========================================================
+# FUNCIÓN KPI CARD (AGREGADA Y CORREGIDA)
+# ========================================================
 def kpi_card(title, value, subtitle=None, color="primary"):
     return dbc.Card(
         dbc.CardBody([
@@ -139,210 +85,205 @@ def kpi_card(title, value, subtitle=None, color="primary"):
         style={"height": "100%"}
     )
 
-# controles de predicción (se reusan en sidebar)
-controls_pred = dbc.Card(
-    dbc.CardBody([
-        html.H5("Predicción interactiva", className="mb-3"),
-        dbc.Row([
-            dbc.Col(dbc.Label("Mes"), width=3),
-            dbc.Col(
-                dcc.Slider(
-                    1, 12, 1, value=1, id="in-mes",
-                    marks={i: str(i) for i in range(1, 13)}
-                ),
-                width=9
-            )
-        ], className="mb-3"),
+# ========================================================
+# FUNCIONES AUXILIARES
+# ========================================================
+ALIASES = {
+    "ndvi":["ndvi"], "evi":["evi"],
+    "precipitacion":["prec","precipitacion","rain","ppt","mm"],
+    "tempmax":["tmax","tempmax"], "tempmin":["tmin","tempmin"],
+    "humedadrelativa":["hum","rh","humedadrelativa"],
+    "month_sin":["month_sin","mes_sin"],
+    "month_cos":["month_cos","mes_cos"],
+    "mes":["mes","month"], "anio":["anio","year"],
+    "fecha":["fecha","date","yyyymm","yearmonth"]
+}
 
-        dbc.Row([
-            dbc.Col(dbc.Label("NDVI"), md=6),
-            dbc.Col(dbc.Label("EVI"),  md=6)
-        ], className="mt-2"),
-        dbc.Row([
-            dbc.Col(
-                dcc.Slider(
-                    0.2, 0.95, 0.01,
-                    value=float(DF["NDVI"].median()) if "NDVI" in DF else 0.6,
-                    id="in-ndvi"
-                ),
-                md=6
-            ),
-            dbc.Col(
-                dcc.Slider(
-                    0.1, 0.9, 0.01,
-                    value=float(DF["EVI"].median()) if "EVI" in DF else 0.4,
-                    id="in-evi"
-                ),
-                md=6
-            ),
-        ]),
-        html.Hr(),
-        dbc.Row([
-            dbc.Col(dbc.Label("Precipitación (mm)"), md=12),
-            dbc.Col(
-                dcc.Slider(
-                    60, 300, 1,
-                    value=float(DF["Precipitacion"].median())
-                    if "Precipitacion" in DF else 160,
-                    id="in-precip"
-                ),
-                md=12
-            )
-        ], className="mb-2"),
-        dbc.Row([
-            dbc.Col(dbc.Label("Temp. Máx. (°C)"), md=6),
-            dbc.Col(dbc.Label("Temp. Mín. (°C)"), md=6)
-        ]),
-        dbc.Row([
-            dbc.Col(
-                dcc.Slider(
-                    20, 30, 0.1,
-                    value=float(DF["TempMax"].median()) if "TempMax" in DF else 25,
-                    id="in-tmax"
-                ),
-                md=6
-            ),
-            dbc.Col(
-                dcc.Slider(
-                    10, 20, 0.1,
-                    value=float(DF["TempMin"].median()) if "TempMin" in DF else 15,
-                    id="in-tmin"
-                ),
-                md=6
-            ),
-        ]),
-        dbc.Row([
-            dbc.Col(dbc.Label("Humedad Relativa (%)"), md=12),
-            dbc.Col(
-                dcc.Slider(
-                    60, 90, 1,
-                    value=float(DF["HumedadRelativa"].median())
-                    if "HumedadRelativa" in DF else 75,
-                    id="in-hum"
-                ),
-                md=12
-            )
-        ], className="mb-3"),
+def build_pred_row(ndvi,evi,prec,tmax,tmin,hum,mes,req_cols):
+    m_sin=np.sin(2*np.pi*mes/12)
+    m_cos=np.cos(2*np.pi*mes/12)
+    vals = {
+        "ndvi":float(ndvi),
+        "evi":float(evi),
+        "precipitacion":float(prec),
+        "tempmax":float(tmax),
+        "tempmin":float(tmin),
+        "humedadrelativa":float(hum),
+        "month_sin":m_sin,
+        "month_cos":m_cos,
+        "mes":int(mes),
+        "anio":int(DF["anio"].max()),
+        "fecha":int(DF["anio"].max()*100+mes)
+    }
 
-        dbc.Button("Predecir rendimiento", id="btn-predict",
-                   color="primary", className="w-100"),
-        html.Div(id="pred-output", className="mt-3 fw-bold"),
-    ]),
-    className="shadow-sm",
-    style={"backgroundColor": "#fafafa"}
-)
+    def match(col):
+        cl=col.lower()
+        if cl in vals: return vals[cl]
+        for k,als in ALIASES.items():
+            if any(a in cl for a in als) and k in vals:
+                return vals[k]
+        return np.nan
 
-# ---------- Sidebar con filtros tipo mockup ----------
-sidebar = dbc.Card(
-    dbc.CardBody([
-        html.H4("Panel Boyacá", className="mb-4 text-center"),
-        dbc.Label("Nivel de riesgo"),
-        dcc.Dropdown(
-            id="dd-nivel",
-            options=[
-                {"label": "Bajo", "value": "Bajo"},
-                {"label": "Medio", "value": "Medio"},
-                {"label": "Alto", "value": "Alto"},
-            ],
-            value="Medio",
-            clearable=False,
-            className="mb-3"
-        ),
-        dbc.Label("Ubicación"),
-        dcc.Dropdown(
-            id="dd-ubicacion",
-            options=[{"label": "Boyacá - Departamento", "value": "Boyacá"}],
-            value="Boyacá",
-            clearable=False,
-            className="mb-3"
-        ),
-        dbc.Label("Municipio"),
-        dcc.Dropdown(
-            id="dd-muni",
-            options=[{"label": "Zona cafetera Boyacá (promedio)", "value": "Zona cafetera"}],
-            value="Zona cafetera",
-            clearable=False,
-            className="mb-4"
-        ),
+    row = pd.DataFrame([{c:match(c) for c in req_cols}], columns=req_cols)
+    return row.apply(pd.to_numeric, errors="coerce")
 
-        html.Hr(),
-        controls_pred
-    ]),
-    className="shadow-sm",
-    style={"height": "100%", "backgroundColor": "#222", "color": "#f8f9fa"}
-)
+# ========================================================
+# RANGOS PARA SLIDERS
+# ========================================================
+def get_range(col, dmin, dmax):
+    if col in DF:
+        a=float(DF[col].min())
+        b=float(DF[col].max())
+        m=float(DF[col].median())
+        return a,b,m
+    return dmin,dmax,(dmin+dmax)/2
 
-# ===================== Figuras base =====================
+def make_marks(vmin, vmax, n=5, digits=0):
+    vals=np.linspace(vmin, vmax, n)
+    return {
+        round(v,digits):{
+            "label":str(round(v,digits)),
+            "style":{"fontSize":"12px"}
+        }
+        for v in vals
+    }
 
-# KPIs (usamos claves flexibles por si cambia metadata)
-metricas = META.get("metricas_test_snapshot") or META.get("metricas_notebook") or {}
-R2_val   = metricas.get("R2", 0.0)
-RMSE_val = metricas.get("RMSE", 0.0)
-MAE_val  = metricas.get("MAE", 0.0)
-N_obs    = META.get("n_obs", len(DF))
+# NDVI – EVI
+ndvi_min,ndvi_max,ndvi_med=get_range("NDVI",0.2,0.95)
+evi_min,evi_max,evi_med=get_range("EVI",0.1,0.9)
 
-# serie de tiempo base
-fig_ts = px.line(
-    DF_SORTED, x="fecha", y="rendimiento",
-    labels={"fecha": "Fecha", "rendimiento": "t/ha"}
-).update_layout(margin=dict(l=10, r=10, t=10, b=10))
+ndvi_marks=make_marks(ndvi_min,ndvi_max,5,2)
+evi_marks=make_marks(evi_min,evi_max,5,2)
 
-# figura de estacionalidad (caja por mes)
+# Precipitación
+prec_min,prec_max,prec_med=get_range("Precipitacion",60,300)
+prec_marks=make_marks(prec_min,prec_max,6,0)
+
+# Temperaturas
+tmax_min,tmax_max,tmax_med=get_range("TempMax",20,30)
+tmin_min,tmin_max,tmin_med=get_range("TempMin",10,20)
+
+tmax_marks=make_marks(tmax_min,tmax_max,5,1)
+tmin_marks=make_marks(tmin_min,tmin_max,5,1)
+
+# Humedad
+hum_min,hum_max,hum_med=get_range("HumedadRelativa",60,90)
+hum_marks=make_marks(hum_min,hum_max,5,0)
+
+# ========================================================
+# FIGURAS BASE PRINCIPALES (sin tocar)
+# ========================================================
+fig_ts_base = px.line(
+    DF,x="fecha",y="rendimiento",
+    labels={"fecha":"Fecha","rendimiento":"t/ha"}
+).update_layout(margin=dict(l=10,r=10,t=10,b=10))
+
 fig_season = px.box(
-    DF, x="mes_nombre", y="rendimiento",
-    category_orders={"mes_nombre": ["Ene","Feb","Mar","Abr","May","Jun",
-                                    "Jul","Ago","Sep","Oct","Nov","Dic"]},
-    labels={"mes_nombre": "Mes", "rendimiento": "t/ha"},
-    title="Distribución mensual del rendimiento"
-).update_layout(margin=dict(l=10, r=10, t=40, b=10))
+    DF,x="mes_nombre",y="rendimiento",
+    category_orders={"mes_nombre":[
+        "Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"
+    ]},
+    labels={"mes_nombre":"Mes","rendimiento":"t/ha"},
+    title="Estacionalidad mensual"
+).update_layout(margin=dict(l=10,r=10,t=40,b=10))
 
-# comparación de modelos (barras)
-fig_modelos = px.bar(
-    DF_RES, x="Modelo", y=["R2", "RMSE", "MAE"],
-    barmode="group",
-    title="Comparación de métricas entre modelos"
-).update_layout(margin=dict(l=10, r=10, t=40, b=10))
+# ========================================================
+# MÉTRICAS DEL MODELO
+# ========================================================
+metricas = META.get("metricas_test_snapshot") or META.get("metricas_notebook") or {}
+R2_val = metricas.get("R2", 0.0)
+RMSE_val = metricas.get("RMSE", 0.0)
+MAE_val = metricas.get("MAE", 0.0)
+N_obs = META.get("n_obs", len(DF))
 
-# mapa inicial (Boyacá centro aproximado)
-def make_mapa(nivel="Medio"):
-    riesgo_map = {"Bajo": 0.25, "Medio": 0.5, "Alto": 0.85}
-    val = riesgo_map.get(nivel, 0.5)
 
-    df_map = pd.DataFrame({
-        "lugar": ["Boyacá (promedio)"],
-        "lat": [5.545],   # coordenadas aproximadas del departamento
-        "lon": [-73.362],
-        "riesgo": [val]
-    })
-
-    fig = px.scatter_geo(
-        df_map, lat="lat", lon="lon", color="riesgo",
-        color_continuous_scale=["#2ecc71", "#f1c40f", "#e74c3c"],
-        range_color=(0, 1),
-        size=[20],
-        hover_name="lugar",
-        projection="natural earth",
-        title="Mapa de riesgo – Departamento de Boyacá"
-    )
-    fig.update_layout(
-        margin=dict(l=10, r=10, t=40, b=10),
-        geo=dict(
-            scope="south america",
-            showcountries=True,
-            countrycolor="LightGray",
-            lataxis_range=[-5, 15],
-            lonaxis_range=[-80, -65]
-        )
-    )
-    return fig
-
-fig_mapa_init = make_mapa("Medio")
-
-# ===================== App y layout =====================
-
+# ========================================================
+# DASH APP
+# ========================================================
 app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY], title="Dashboard Boyacá")
 
-main_content = dbc.Container(fluid=True, children=[
+
+# ========================================================
+# ------------  FUNCIÓN DE RIESGO MULTIVARIADO ------------
+# ========================================================
+def riesgo_multivariado(ndvi, evi, prec, tmax, tmin, hum):
+    # Cuantiles reales desde DF
+    p25_ndvi = DF["NDVI"].quantile(0.25)
+    p25_evi  = DF["EVI"].quantile(0.25)
+    p25_prec = DF["Precipitacion"].quantile(0.25)
+    p75_prec = DF["Precipitacion"].quantile(0.75)
+
+    # --- A. Vegetación ---
+    if ndvi < p25_ndvi and evi < p25_evi:
+        Rv = 1.0
+    elif ndvi < p25_ndvi:
+        Rv = 0.7
+    elif evi < p25_evi:
+        Rv = 0.6
+    elif evi < ndvi - 0.1:   # contradicción
+        Rv = 0.5
+    elif ndvi < 0.55:
+        Rv = 0.2
+    else:
+        Rv = 0.0
+
+    # --- B. Lluvia ---
+    if prec > p75_prec:
+        Rl = 1.0
+    elif prec < p25_prec:
+        Rl = 0.7
+    else:
+        Rl = 0.3
+
+    # --- C. Temperatura ---
+    if tmax > 29 and tmin > 18:
+        Rt = 1.0
+    elif tmax > 28:
+        Rt = 0.6
+    else:
+        Rt = 0.3
+
+    # --- D. Humedad ---
+    if hum < 60:
+        Rh = 1.0
+    elif hum > 90:
+        Rh = 0.6
+    else:
+        Rh = 0.3
+
+    # --- COMBINACIÓN ---
+    riesgo = 0.35*Rv + 0.30*Rl + 0.20*Rt + 0.15*Rh
+    return round(float(riesgo), 3)
+
+
+# ========================================================
+# TABLA DE COLORES DEL RIESGO
+# ========================================================
+def color_riesgo(r):
+    if r > 0.75: return "#d62728"   # rojo – muy alto
+    if r > 0.60: return "#ff7f0e"   # naranja – alto
+    if r > 0.40: return "#f2d600"   # amarillo – medio
+    if r > 0.20: return "#1f77b4"   # azul – bajo
+    return "#2ca02c"                # verde – muy bajo
+
+def clasif_riesgo(r):
+    """Devuelve la categoría de riesgo como texto."""
+    if r > 0.75:
+        return "Muy alto"
+    elif r > 0.60:
+        return "Alto"
+    elif r > 0.40:
+        return "Medio"
+    elif r > 0.20:
+        return "Bajo"
+    else:
+        return "Muy bajo"
+
+# ========================================================
+# LAYOUT PRINCIPAL (TAL COMO EL TUYO, SIN CAMBIOS)
+# ========================================================
+app.layout = dbc.Container(fluid=True, children=[
+
     html.Br(),
     dbc.Row([
         dbc.Col(html.H2("📊 Dashboard – Rendimiento de Café (Boyacá)"), md=8),
@@ -350,194 +291,287 @@ main_content = dbc.Container(fluid=True, children=[
                 md=4, className="text-end align-self-center")
     ]),
     html.Hr(),
+
+    # ----------------- KPIs -----------------
     dbc.Row([
-        dbc.Col(kpi_card("R² (test)",   f"{R2_val:.3f}",   color="success"), md=3),
+        dbc.Col(kpi_card("R² (test)", f"{R2_val:.3f}", color="success"), md=3),
         dbc.Col(kpi_card("RMSE (test)", f"{RMSE_val:.3f}", color="danger"),  md=3),
-        dbc.Col(kpi_card("MAE (test)",  f"{MAE_val:.3f}",  color="warning"), md=3),
+        dbc.Col(kpi_card("MAE (test)", f"{MAE_val:.3f}", color="warning"),   md=3),
         dbc.Col(kpi_card("Observaciones", f"{N_obs:,}"), md=3),
     ], className="g-3 mb-3"),
 
-    dbc.Tabs([
-        dbc.Tab(label="Predicción", tab_id="tab-pred", children=[
-            html.Br(),
-            dbc.Row([
-                dbc.Col(dbc.Card(dbc.CardBody([
-                    html.H5("Evolución mensual del rendimiento"),
-                    dcc.Graph(id="ts-rend", figure=fig_ts)
-                ])), md=12)
-            ], className="mb-3"),
-            dbc.Row([
-                dbc.Col(dbc.Card(dbc.CardBody([
-                    html.H5("Predicción vs historial"),
-                    dcc.Graph(id="pred-vs-real", figure=fig_ts),
-                    html.Div(
-                        "La línea punteada indica el rendimiento estimado "
-                        "para la combinación de clima y vegetación seleccionada.",
-                        className="text-muted small mt-2"
-                    )
-                ])), md=12)
-            ])
-        ]),
-
-        dbc.Tab(label="Análisis histórico", tab_id="tab-analisis", children=[
-            html.Br(),
-            dbc.Row([
-                dbc.Col(dbc.Card(dbc.CardBody([
-                    html.H5("Relación con variables"),
-                    dbc.Row([
-                        dbc.Col(dcc.Dropdown(
-                            id="dd-var",
-                            options=[{"label": v, "value": v} for v in CAND_VARS]
-                            or [{"label": "NDVI", "value": "NDVI"}],
-                            value=CAND_VARS[0] if CAND_VARS else "NDVI",
-                            clearable=False
-                        ), md=4)
-                    ], className="mb-2"),
-                    dcc.Graph(id="scat-rel")
-                ])), md=7),
-                dbc.Col(dbc.Card(dbc.CardBody([
-                    html.H5("Estacionalidad del rendimiento"),
-                    dcc.Graph(id="fig-season", figure=fig_season)
-                ])), md=5),
-            ])
-        ]),
-
-        dbc.Tab(label="Modelos", tab_id="tab-modelos", children=[
-            html.Br(),
-            dbc.Row([
-                dbc.Col(dbc.Card(dbc.CardBody([
-                    html.H5("Tabla de resultados de modelos"),
-                    dash_table.DataTable(
-                        id="tbl-result",
-                        data=DF_RES.round(4).to_dict("records"),
-                        columns=[{"name": c, "id": c} for c in DF_RES.columns],
-                        sort_action="native",
-                        page_size=8,
-                        style_table={"overflowX": "auto"},
-                        style_cell={
-                            "fontFamily": "Inter, system-ui",
-                            "fontSize": "14px",
-                            "padding": "6px"
-                        },
-                        style_header={"fontWeight": "700"}
-                    )
-                ])), md=6),
-                dbc.Col(dbc.Card(dbc.CardBody([
-                    html.H5("Comparación gráfica de métricas"),
-                    dcc.Graph(id="fig-modelos", figure=fig_modelos)
-                ])), md=6),
-            ])
-        ]),
-
-        dbc.Tab(label="Mapa Boyacá", tab_id="tab-mapa", children=[
-            html.Br(),
-            dbc.Row([
-                dbc.Col(dbc.Card(dbc.CardBody([
-                    html.H5("Mapa de riesgo para Boyacá"),
-                    dcc.Graph(id="fig-mapa", figure=fig_mapa_init),
-                    html.Div(id="texto-mapa", className="mt-2")
-                ])), md=12)
-            ])
-        ]),
-    ])
-])
-
-app.layout = dbc.Container(fluid=True, children=[
-    html.Br(),
+    # ============================================================
+    #          PRIMERA FILA : Predicción + Serie histórica
+    # ============================================================
     dbc.Row([
-        dbc.Col(sidebar, md=3, lg=3),
-        dbc.Col(main_content, md=9, lg=9)
-    ])
+        # -------- COLUMNA IZQUIERDA: SLIDERS --------
+        dbc.Col(
+            dbc.Card(dbc.CardBody([
+                html.H4("Predicción interactiva", className="mb-3"),
+
+                # ------------ Mes ------------
+                dbc.Row([
+                    dbc.Col(dbc.Label("Mes"), md=3),
+                    dbc.Col(
+                        dcc.Slider(1, 12, 1, value=1, id="in-mes",
+                                   marks={i: str(i) for i in range(1,13)}),
+                        md=9
+                    )
+                ], className="mb-3"),
+
+                # ------------ NDVI / EVI ------------
+                dbc.Row([
+                    dbc.Col(dbc.Label("NDVI"), md=6),
+                    dbc.Col(dbc.Label("EVI"),  md=6)
+                ]),
+                dbc.Row([
+                    dbc.Col(dcc.Slider(ndvi_min, ndvi_max, 0.02, value=ndvi_med,
+                                       id="in-ndvi", marks=ndvi_marks), md=6),
+                    dbc.Col(dcc.Slider(evi_min, evi_max, 0.02, value=evi_med,
+                                       id="in-evi", marks=evi_marks), md=6)
+                ], className="mb-3"),
+
+                # ------------ Precipitación ------------
+                dbc.Row([
+                    dbc.Col(dbc.Label("Precipitación (mm)"), md=12),
+                    dbc.Col(
+                        dcc.Slider(prec_min, prec_max, 5, value=prec_med,
+                                   id="in-precip", marks=prec_marks),
+                        md=12
+                    )
+                ], className="mb-3"),
+
+                # ------------ Temperaturas ------------
+                dbc.Row([
+                    dbc.Col(dbc.Label("Temp. Máx. (°C)"), md=6),
+                    dbc.Col(dbc.Label("Temp. Mín. (°C)"), md=6)
+                ]),
+                dbc.Row([
+                    dbc.Col(dcc.Slider(tmax_min, tmax_max, 0.5, value=tmax_med,
+                                       id="in-tmax", marks=tmax_marks), md=6),
+                    dbc.Col(dcc.Slider(tmin_min, tmin_max, 0.5, value=tmin_med,
+                                       id="in-tmin", marks=tmin_marks), md=6)
+                ], className="mb-3"),
+
+                # ------------ Humedad ------------
+                dbc.Row([
+                    dbc.Col(dbc.Label("Humedad relativa (%)"), md=12),
+                    dbc.Col(dcc.Slider(hum_min, hum_max, 1, value=hum_med,
+                                       id="in-hum", marks=hum_marks), md=12)
+                ], className="mb-3"),
+
+                dbc.Button("Predecir rendimiento", id="btn-predict",
+                           color="primary", className="w-100 mb-3"),
+                html.Div(id="pred-output", className="fw-bold"),
+
+            ])),
+            md=4
+        ),
+
+        # -------- COLUMNA DERECHA: SERIE TEMPORAL --------
+        dbc.Col(
+            dbc.Card(dbc.CardBody([
+                html.H4("Evolución mensual del rendimiento"),
+                dcc.Graph(id="ts-rend", figure=fig_ts_base)
+            ])),
+            md=8
+        )
+    ], className="mb-4"),
+
+    # ============================================================
+    #          SEGUNDA FILA : Predicción vs Real + Estacionalidad
+    # ============================================================
+    dbc.Row([
+        dbc.Col(
+            dbc.Card(dbc.CardBody([
+                html.H4("Predicción vs historial"),
+                dcc.Graph(id="pred-vs-real", figure=fig_ts_base)
+            ])),
+            md=7
+        ),
+
+        dbc.Col(
+            dbc.Card(dbc.CardBody([
+                html.H4("Estacionalidad del rendimiento"),
+                dcc.Graph(id="fig-season", figure=fig_season)
+            ])),
+            md=5
+        )
+    ], className="mb-4"),
+
+    # ============================================================
+    #          TERCERA FILA : Relación con variables
+    # ============================================================
+    dbc.Row([
+        dbc.Col(
+            dbc.Card(dbc.CardBody([
+                html.H4("Relación con variables explicativas"),
+                dcc.Dropdown(
+                    id="dd-var",
+                    options=[{"label":v,"value":v} for v in CAND_VARS],
+                    value=CAND_VARS[0], clearable=False
+                ),
+                dcc.Graph(id="scat-rel")
+            ])),
+            md=12
+        )
+    ], className="mb-4"),
+
+    html.Hr(),
+
+    # ============================================================
+    #       **** TABLERO FINAL DE RIESGO CLIMÁTICO ****
+    # ============================================================
+    html.H3("🌡️🌧️ Tablero de Riesgo Climático — Boyacá", className="mt-4"),
+
+    dbc.Row([
+        dbc.Col(
+            dbc.Card(dbc.CardBody([
+                html.H4("Mapa nacional (riesgo por departamento)"),
+                dcc.Graph(id="mapa-riesgo")
+            ])),
+            md=8
+        ),
+
+        dbc.Col(
+            dbc.Card(dbc.CardBody([
+                html.H4("Detalle del riesgo calculado"),
+                html.Div(id="riesgo-texto", className="fs-5")
+            ])),
+            md=4
+        )
+    ], className="mb-4"),
+
+    html.Br()
 ])
 
-# ===================== Callbacks =====================
-
-# scatter de relación con variables
+# ========================================================
+# CALLBACKS DEL DASHBOARD
+# ========================================================
 @app.callback(
-    Output("scat-rel", "figure"),
-    Input("dd-var", "value")
+    Output("scat-rel","figure"),
+    Input("dd-var","value")
 )
-def update_scatter(var):
-    dfp = DF.dropna(subset=[var, "rendimiento"])
-    fig = px.scatter(
-        dfp, x=var, y="rendimiento", trendline="ols",
-        labels={var: var, "rendimiento": "t/ha"},
-        title=f"Rendimiento vs {var}"
-    )
-    fig.update_layout(margin=dict(l=10, r=10, t=40, b=10))
+def update_scatter(v):
+    dfp=DF.dropna(subset=[v,"rendimiento"])
+    fig=px.scatter(dfp,x=v,y="rendimiento",trendline="ols")
+    fig.update_layout(margin=dict(l=10,r=10,t=30,b=10))
     return fig
 
-# predicción + figura pred vs historial
+
 @app.callback(
-    Output("pred-output", "children"),
-    Output("pred-vs-real", "figure"),
-    Input("btn-predict", "n_clicks"),
-    State("in-ndvi", "value"),
-    State("in-evi", "value"),
-    State("in-precip", "value"),
-    State("in-tmax", "value"),
-    State("in-tmin", "value"),
-    State("in-hum", "value"),
-    State("in-mes", "value"),
+    Output("pred-output","children"),
+    Output("pred-vs-real","figure"),
+    Output("mapa-riesgo","figure"),
+    Output("riesgo-texto","children"),
+    Input("btn-predict","n_clicks"),
+    State("in-ndvi","value"),
+    State("in-evi","value"),
+    State("in-precip","value"),
+    State("in-tmax","value"),
+    State("in-tmin","value"),
+    State("in-hum","value"),
+    State("in-mes","value"),
     prevent_initial_call=True
 )
-def predict_click(nc, ndvi, evi, precip, tmax, tmin, hum, mes):
-    try:
-        req_cols = required_cols_from_pipe(PIPE, FEATURE_COLS)
-        fila = build_pred_row(ndvi, evi, precip, tmax, tmin, hum, mes, req_cols)
-        fix_imputer_dtype(PIPE)
-        pred = float(PIPE.predict(fila)[0])
+def update_pred(n, ndvi, evi, prec, tmax, tmin, hum, mes):
 
-        # figura: serie + línea horizontal con la predicción
-        fig = px.line(
-            DF_SORTED, x="fecha", y="rendimiento",
-            labels={"fecha": "Fecha", "rendimiento": "t/ha"}
-        )
-        fig.add_hline(
-            y=pred,
-            line_dash="dot",
-            line_color="red",
-            annotation_text=f"Predicción {pred:.2f} t/ha"
-        )
-        fig.update_layout(margin=dict(l=10, r=10, t=40, b=10))
+    req_cols = FEATURE_COLS
+    row = build_pred_row(ndvi,evi,prec,tmax,tmin,hum,mes,req_cols)
+    fix_imputer_dtype(PIPE)
+    pred = float(PIPE.predict(row)[0])
 
-        # interpretación simple de riesgo
-        q25, q75 = DF["rendimiento"].quantile([0.25, 0.75])
-        if pred >= q75:
-            texto_riesgo = "📈 Alta productividad esperada. Riesgo de pérdida bajo."
-        elif pred >= q25:
-            texto_riesgo = "⚖️ Rendimiento dentro de un rango medio/histórico."
-        else:
-            texto_riesgo = "⚠️ Rendimiento bajo. Riesgo elevado, el seguro sería relevante."
+    # -----------------------------------------
+    # Serie temporal con línea roja
+    # -----------------------------------------
+    fig_ts = px.line(DF, x="fecha", y="rendimiento")
+    fig_ts.add_hline(y=pred, line_dash="dot", line_color="red",
+                     annotation_text=f"{pred:.2f} t/ha")
+    fig_ts.update_layout(margin=dict(l=10,r=10,t=30,b=10))
 
-        return f"✅ Rendimiento estimado: {pred:.2f} t/ha. {texto_riesgo}", fig
+    # -----------------------------------------
+    # Riesgo multivariado
+    # -----------------------------------------
+    R = riesgo_multivariado(ndvi,evi,prec,tmax,tmin,hum)
+    color_boy = color_riesgo(R)
+    categoria = clasif_riesgo(R)
 
-    except Exception as e:
-        # si algo falla, devolvemos la serie base
-        return f"⚠️ Error al predecir: {e}", fig_ts
-
-# mapa de riesgo según el nivel seleccionado
-@app.callback(
-    Output("fig-mapa", "figure"),
-    Output("texto-mapa", "children"),
-    Input("dd-nivel", "value"),
-    Input("dd-ubicacion", "value"),
-    Input("dd-muni", "value")
+    texto_riesgo = (
+    f"Riesgo total estimado: {R:.2f} "
+    f"({categoria})."
 )
-def update_mapa(nivel, ubicacion, muni):
-    if nivel is None:
-        nivel = "Medio"
-    fig = make_mapa(nivel)
 
-    mensajes = {
-        "Bajo":  "Nivel de riesgo bajo: condiciones cercanas a las mejores observadas.",
-        "Medio": "Nivel de riesgo medio: variabilidad moderada, el seguro puede apoyar estabilidad.",
-        "Alto":  "Nivel de riesgo alto: probabilidad importante de pérdidas, el seguro cobra mayor relevancia."
-    }
-    texto = f"Zona: {ubicacion} – {muni}. {mensajes.get(nivel, '')}"
-    return fig, texto
+    # -----------------------------------------
+    # Mapa nacional coloreando solo Boyacá
+    # -----------------------------------------
+    df_map = pd.DataFrame({
+    "NOMBRE_DPT": [f["properties"]["NOMBRE_DPT"] for f in GEO_COL["features"]],
+})
+    df_map["es_boyaca"] = df_map["NOMBRE_DPT"].str.upper() == "BOYACA"
 
-# ===================== Main =====================
+    fig_map = go.Figure()
 
+# ----- 1) Capa base: todo Colombia en gris -----
+    fig_map.add_choropleth(
+        geojson=GEO_COL,
+        locations=df_map["NOMBRE_DPT"],
+        z=[1.0] * len(df_map),  # valor dummy
+        featureidkey="properties.NOMBRE_DPT",
+        colorscale=[[0, "#e0e0e0"], [1, "#e0e0e0"]],  # gris claro
+        showscale=False,
+        marker_line_color="white",
+        marker_line_width=0.5,
+)
+
+# ----- 2) Capa de Boyacá: coloreada según el riesgo R -----
+    fig_map.add_choropleth(
+        geojson=GEO_COL,
+        locations=df_map.loc[df_map["es_boyaca"], "NOMBRE_DPT"],
+        z=[R],  # el valor de riesgo para Boyacá
+        featureidkey="properties.NOMBRE_DPT",
+        colorscale=[
+            [0.00, "#2ca02c"],  # muy bajo
+            [0.25, "#1f77b4"],  # bajo
+            [0.50, "#f2d600"],  # medio
+            [0.75, "#ff7f0e"],  # alto
+            [1.00, "#d62728"],  # muy alto
+        ],
+        zmin=0,
+        zmax=1,
+        colorbar_title="Riesgo",
+        marker_line_color="black",
+        marker_line_width=0.8,
+)
+
+    fig_map.update_geos(fitbounds="locations", visible=False)
+    fig_map.update_layout(
+        title="Riesgo climático estimado para Boyacá",
+        margin=dict(l=10, r=10, t=40, b=10)
+    )
+
+
+
+    # -----------------------------------------
+    # Texto principal
+    # -----------------------------------------
+    q25,q75=DF["rendimiento"].quantile([0.25,0.75])
+    if pred>=q75:
+        msg="📈 Alta productividad esperada."
+    elif pred>=q25:
+        msg="⚖️ Rendimiento medio."
+    else:
+        msg="⚠️ Riesgo alto de pérdida."
+
+    return (
+        f"Predicción: {pred:.2f} t/ha — {msg}",
+        fig_ts,
+        fig_map,
+        texto_riesgo
+    )
+
+
+# ========================================================
+# MAIN
+# ========================================================
 if __name__ == "__main__":
     app.run(debug=True, port=8050)
