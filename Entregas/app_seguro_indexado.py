@@ -22,7 +22,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 # Como el script está en la RAÍZ:
 # artifacts está dentro de Entregas/artifacts
-ARTI = BASE_DIR / "Entregas" / "artifacts"
+ARTIFACTS_DIR = BASE_DIR / "Entregas" / "artifacts"
 
 # Y Data está directamente en la raíz
 DATA = BASE_DIR / "Data"
@@ -30,10 +30,10 @@ DATA = BASE_DIR / "Data"
 # ========================================================
 # CARGA MODELO Y DATASET
 # ========================================================
-DF = pd.read_csv(ARTI / "dataset_modelo.csv")
-META = json.loads((ARTI / "metadata.json").read_text(encoding="utf-8"))
-PIPE = joblib.load(ARTI / "modelo_boyaca.pkl")
-FEATURE_COLS = joblib.load(ARTI / "feature_cols.pkl")
+DF = pd.read_csv(ARTIFACTS_DIR / "dataset_modelo.csv")
+META = json.loads((ARTIFACTS_DIR / "metadata.json").read_text(encoding="utf-8"))
+PIPE = joblib.load(ARTIFACTS_DIR / "modelo_boyaca.pkl")
+FEATURE_COLS = joblib.load(ARTIFACTS_DIR / "feature_cols.pkl")
 
 # ========================================================
 # CARGA GEOJSON REAL DE COLOMBIA
