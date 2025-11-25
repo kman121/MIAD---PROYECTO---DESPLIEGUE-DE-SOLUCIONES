@@ -1,0 +1,5 @@
+{
+  "setup": ["[email protected]"],
+  "install": ["pip install -r requirements.txt"],
+  "deploy": ["gunicorn app_seguro_indexado:app.server"]
+}
