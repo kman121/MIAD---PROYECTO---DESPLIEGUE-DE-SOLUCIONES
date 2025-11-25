@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 import joblib
 import os
+os.environ["SKLEARN_ALLOW_NO_OPENMP"] = "1"
+
 
 
 from dash import Dash, dcc, html, Input, Output, State
