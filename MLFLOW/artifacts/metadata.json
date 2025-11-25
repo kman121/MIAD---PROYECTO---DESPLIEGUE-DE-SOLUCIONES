@@ -1,0 +1,20 @@
+{
+  "model": "RandomForestRegressor",
+  "n_obs": 96,
+  "features": [
+    "NDVI",
+    "EVI",
+    "Precipitacion",
+    "TempMax",
+    "TempMin",
+    "HumedadRelativa",
+    "month_sin",
+    "month_cos"
+  ],
+  "metricas_test_snapshot": {
+    "R2": 0.5244793709841047,
+    "RMSE": 0.01874909664490534,
+    "MAE": 0.012967500000000015
+  },
+  "source": "artifacts/dataset_modelo.csv"
+}
