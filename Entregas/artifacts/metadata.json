@@ -1,5 +1,5 @@
 {
-  "model": "RandomForestRegressor",
+  "model": "LinearRegression",
   "n_obs": 96,
   "features": [
     "NDVI",
@@ -12,9 +12,9 @@
     "month_cos"
   ],
   "metricas_test_snapshot": {
-    "R2": 0.5244793709841047,
-    "RMSE": 0.01874909664490534,
-    "MAE": 0.012967500000000015
+    "R2": -0.42903118671999585,
+    "RMSE": 0.01383579098351097,
+    "MAE": 0.011548654866411814
   },
   "source": "artifacts/dataset_modelo.csv"
 }
