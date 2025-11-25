@@ -17,8 +17,14 @@ from sklearn.impute import SimpleImputer
 # ========================================================
 # RUTA BASE
 # ========================================================
+
 BASE_DIR = Path(__file__).resolve().parent
-ARTI = BASE_DIR / "artifacts"
+
+# Como el script está en la RAÍZ:
+# artifacts está dentro de Entregas/artifacts
+ARTI = BASE_DIR / "Entregas" / "artifacts"
+
+# Y Data está directamente en la raíz
 DATA = BASE_DIR / "Data"
 
 # ========================================================
