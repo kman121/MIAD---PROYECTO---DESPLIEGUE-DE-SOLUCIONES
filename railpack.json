@@ -1,5 +1,11 @@
 {
-  "setup": ["[email protected]"],
-  "install": ["pip install -r requirements.txt"],
-  "deploy": ["gunicorn app_seguro_indexado:app.server"]
+  "$schema": "https://schema.railpack.com/railpack-1.0.0.json",
+  "build": {
+    "python": {
+      "version": "3.11"
+    }
+  },
+  "deploy": {
+    "start": "gunicorn app_seguro_indexado:app.server"
+  }
 }
