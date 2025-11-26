@@ -1,1 +1,1 @@
-web: gunicorn app.app_seguro_indexado:app.server
+web: gunicorn app_seguro_indexado:server
